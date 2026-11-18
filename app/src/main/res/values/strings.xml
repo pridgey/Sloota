@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Sloota</string>
+    <string name="watch_label">Sloota logger</string>
+    <string name="watch_description">Records screen changes, scrolls and taps in YouTube, Instagram, TikTok and Reddit to a log on this phone, so Sloota can learn where natural stopping points are. Nothing leaves the phone unless you share the log.</string>
+    <string name="media_label">Sloota playback logger</string>
+    <string name="tile_label">Mark stop</string>
+</resources>
