@@ -1,17 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Self-update from GitHub releases -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
-    <!-- Lets the home screen show whether each watched app is installed. -->
+    <!-- Lets the home screen show whether each limited app is installed. -->
     <queries>
         <package android:name="com.google.android.youtube" />
-        <package android:name="com.instagram.android" />
-        <package android:name="com.zhiliaoapp.musically" />
-        <package android:name="com.ss.android.ugc.trill" />
-        <package android:name="com.reddit.frontpage" />
+        <package android:name="app.lurk" />
     </queries>
 
     <application
@@ -68,6 +66,16 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+
+        <!-- Lurk reports its own stopping points here. Exported on purpose; see StopReceiver. -->
+        <receiver
+            android:name=".gate.StopReceiver"
+            android:exported="true"
+            tools:ignore="ExportedReceiver">
+            <intent-filter>
+                <action android:name="dev.pridgey.sloota.STOPPING_POINT" />
+            </intent-filter>
+        </receiver>
 
         <receiver
             android:name=".update.UpdateReceiver"

@@ -8,6 +8,8 @@ import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.service.notification.NotificationListenerService
 import dev.pridgey.sloota.Targets
+import dev.pridgey.sloota.gate.Gate
+import dev.pridgey.sloota.gate.YouTubeRules
 import dev.pridgey.sloota.log.EventLog
 import dev.pridgey.sloota.log.NodeDump
 import org.json.JSONObject
@@ -19,6 +21,9 @@ import kotlin.math.abs
  * - media_session / media_session_end: a player appeared or went away
  * - media_state: play, pause, buffering, stop, seeks (normal playback progress is skipped)
  * - media_meta:  a new video (title, channel, length), which is how autoplay shows up
+ *
+ * For the gate, a new video is a stopping point, and sessions get paused when Sloota ends them
+ * (otherwise YouTube Premium keeps playing in the background or picture-in-picture).
  */
 class MediaWatch : NotificationListenerService() {
 
@@ -27,6 +32,7 @@ class MediaWatch : NotificationListenerService() {
     private val onSessionsChanged = MediaSessionManager.OnActiveSessionsChangedListener { sync(it ?: emptyList()) }
 
     override fun onListenerConnected() {
+        instance = this
         val manager = getSystemService(MediaSessionManager::class.java) ?: return
         sessions = manager
         val me = ComponentName(this, MediaWatch::class.java)
@@ -38,6 +44,7 @@ class MediaWatch : NotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
+        if (instance === this) instance = null
         sessions?.removeOnActiveSessionsChangedListener(onSessionsChanged)
         watched.values.forEach { it.stop() }
         watched.clear()
@@ -45,16 +52,17 @@ class MediaWatch : NotificationListenerService() {
     }
 
     private fun sync(controllers: List<MediaController>) {
-        val live = controllers.filter { Targets.isTarget(it.packageName) }.associateBy { it.sessionToken }
+        val live = controllers.filter { Targets.byPackage(it.packageName) != null }.associateBy { it.sessionToken }
         (watched.keys - live.keys).forEach { token -> watched.remove(token)?.stop() }
         live.forEach { (token, controller) ->
             if (token !in watched) watched[token] = Watcher(controller).also { it.start() }
         }
     }
 
-    private class Watcher(private val controller: MediaController) : MediaController.Callback() {
-        private val pkg = controller.packageName
+    private class Watcher(val controller: MediaController) : MediaController.Callback() {
+        val pkg: String = controller.packageName
         private var last: PlaybackState? = null
+        private var title: String? = titleOf(controller.metadata)
 
         fun start() {
             controller.registerCallback(this)
@@ -82,6 +90,9 @@ class MediaWatch : NotificationListenerService() {
 
         override fun onMetadataChanged(metadata: MediaMetadata?) {
             EventLog.write("media_meta", pkg) { putMeta(this, metadata) }
+            val next = titleOf(metadata)
+            if (YouTubeRules.isNewVideo(title, next)) Gate.stoppingPoint(pkg, "next_video")
+            if (!next.isNullOrBlank()) title = next
         }
 
         override fun onSessionDestroyed() {
@@ -99,14 +110,29 @@ class MediaWatch : NotificationListenerService() {
         }
     }
 
-    private companion object {
-        fun putState(o: JSONObject, s: PlaybackState) {
+    companion object {
+        @Volatile
+        private var instance: MediaWatch? = null
+
+        fun isPlaying(pkg: String): Boolean =
+            instance?.watched?.values?.any { it.pkg == pkg && it.controller.playbackState?.state == PlaybackState.STATE_PLAYING } == true
+
+        fun pause(pkg: String) {
+            instance?.watched?.values?.filter { it.pkg == pkg }?.forEach { w ->
+                runCatching { w.controller.transportControls.pause() }
+            }
+        }
+
+        private fun titleOf(m: MediaMetadata?): String? =
+            (m?.getText(MediaMetadata.METADATA_KEY_TITLE) ?: m?.getText(MediaMetadata.METADATA_KEY_DISPLAY_TITLE))?.toString()
+
+        private fun putState(o: JSONObject, s: PlaybackState) {
             o.put("state", stateName(s.state))
             o.put("pos", s.position)
             o.put("speed", s.playbackSpeed.toDouble())
         }
 
-        fun putMeta(o: JSONObject, m: MediaMetadata?) {
+        private fun putMeta(o: JSONObject, m: MediaMetadata?) {
             m ?: return
             (m.getText(MediaMetadata.METADATA_KEY_TITLE) ?: m.getText(MediaMetadata.METADATA_KEY_DISPLAY_TITLE))
                 ?.let { o.put("title", NodeDump.clip(it)) }
@@ -115,10 +141,10 @@ class MediaWatch : NotificationListenerService() {
             duration(m)?.let { o.put("dur", it) }
         }
 
-        fun duration(m: MediaMetadata?): Long? =
+        private fun duration(m: MediaMetadata?): Long? =
             m?.getLong(MediaMetadata.METADATA_KEY_DURATION)?.takeIf { it > 0 }
 
-        fun stateName(state: Int) = when (state) {
+        private fun stateName(state: Int) = when (state) {
             PlaybackState.STATE_NONE -> "none"
             PlaybackState.STATE_STOPPED -> "stopped"
             PlaybackState.STATE_PAUSED -> "paused"

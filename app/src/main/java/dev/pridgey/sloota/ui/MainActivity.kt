@@ -10,6 +10,7 @@ import android.provider.Settings
 import android.text.format.Formatter
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
@@ -48,6 +49,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,6 +64,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import dev.pridgey.sloota.BuildConfig
 import dev.pridgey.sloota.Targets
+import dev.pridgey.sloota.gate.Gate
 import dev.pridgey.sloota.log.EventLog
 import dev.pridgey.sloota.update.UpdateBanner
 import dev.pridgey.sloota.update.UpdateRow
@@ -77,7 +80,19 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         checkForUpdatesIfDue(this)
-        setContent { SlootaTheme { Home() } }
+        setContent { SlootaTheme { Root() } }
+    }
+}
+
+@Composable
+private fun Root() {
+    var openApp by rememberSaveable { mutableStateOf<String?>(null) }
+    val app = Targets.byId(openApp)
+    if (app != null) {
+        BackHandler { openApp = null }
+        AppScreen(app) { openApp = null }
+    } else {
+        Home(onOpenApp = { openApp = it.id })
     }
 }
 
@@ -108,21 +123,24 @@ private fun isInstalled(context: Context, pkg: String): Boolean =
     runCatching { context.packageManager.getPackageInfo(pkg, 0) }.isSuccess
 
 @Composable
-private fun Home() {
+private fun Home(onOpenApp: (Targets.App) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var access by remember { mutableStateOf(readAccess(context)) }
-    var stats by remember { mutableStateOf<EventLog.Stats?>(null) }
+    var logStats by remember { mutableStateOf<EventLog.Stats?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
     var confirmClear by remember { mutableStateOf(false) }
     val showUpdate = rememberUpdateBannerVisible()
+    val version = rememberGateVersion()
+    val stats = remember(version) { Gate.stats() }
+    val today = remember(version) { Targets.gated.map { it to Gate.day(it) } }
 
     LifecycleResumeEffect(Unit) {
         access = readAccess(context)
         refresh++
         onPauseOrDispose { }
     }
-    LaunchedEffect(refresh) { stats = withContext(Dispatchers.IO) { EventLog.stats() } }
+    LaunchedEffect(refresh) { logStats = withContext(Dispatchers.IO) { EventLog.stats() } }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
@@ -136,7 +154,7 @@ private fun Home() {
                 Text("Sloota", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Logger. Use your apps normally for a day or two; this records what they report so the stopping-point rules can be built from real data.",
+                    "Stop at a good place, not mid-thing.",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -144,58 +162,41 @@ private fun Home() {
 
             if (showUpdate) UpdateBanner()
 
-            Section("Access") {
-                AccessRow(
-                    title = "Watch apps",
-                    detail = "Accessibility service. Sees screens, scrolls and taps in the apps below.",
-                    on = access.watching,
-                    action = "Turn on",
-                ) { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-                if (!access.watching) {
-                    Hint(
-                        "Switch greyed out? Android blocks sideloaded apps from accessibility until you allow it: " +
-                            "App info → ⋮ → Allow restricted settings, then try again.",
-                    ) {
-                        context.startActivity(
-                            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")),
-                        )
-                    }
-                }
-                AccessRow(
-                    title = "Video playback",
-                    detail = "Notification access. Only used to read play, pause and video length.",
-                    on = access.playback,
-                    action = "Turn on",
-                ) { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
-            }
+            val setupDone = access.watching && access.playback
+            if (!setupDone) SetupSection(access)
 
-            Section("Watching") {
-                Targets.apps.forEach { app ->
+            StatTiles(stats)
+
+            Section("Today") {
+                today.forEach { (app, day) ->
                     val installed = app.packages.any { isInstalled(context, it) }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Dot(if (installed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
-                        Spacer(Modifier.width(12.dp))
-                        Text(app.name, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                    AppTodayRow(app, day) { onOpenApp(app) }
+                    if (!installed) {
                         Text(
-                            if (installed) "installed" else "not installed",
-                            style = MaterialTheme.typography.bodyMedium,
+                            "${app.name} isn't installed",
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
+                Text(
+                    "Tap an app to set its daily limit. Days start at 4 AM.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             Section("Mark stopping points") {
                 Text(
                     "Add the “Mark stop” tile to Quick Settings. Tap it whenever you're at a spot where stopping would feel natural. " +
-                        "Those marks are what the rules get checked against.",
+                        "Those marks help tune where Sloota ends a session.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
             Section("Log") {
-                val s = stats
+                val s = logStats
                 if (s == null) {
                     Text("…", style = MaterialTheme.typography.bodyLarge)
                 } else {
@@ -228,6 +229,8 @@ private fun Home() {
                 )
             }
 
+            if (setupDone) SetupSection(access)
+
             Section("About") {
                 StatRow("Version", BuildConfig.VERSION_NAME)
                 // UpdateRow is a ListItem with its own 16dp insets; let it bleed so its text lines up with the page.
@@ -253,8 +256,38 @@ private fun Home() {
     }
 }
 
+
 @Composable
-private fun Section(title: String, content: @Composable () -> Unit) {
+private fun SetupSection(access: Access) {
+    val context = LocalContext.current
+    Section("Setup") {
+        AccessRow(
+            title = "Watch apps",
+            detail = "Accessibility service. Times your apps, spots stopping points and closes them when you're done.",
+            on = access.watching,
+            action = "Turn on",
+        ) { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        if (!access.watching) {
+            Hint(
+                "Switch greyed out? Android blocks sideloaded apps from accessibility until you allow it: " +
+                    "App info → ⋮ → Allow restricted settings, then try again.",
+            ) {
+                context.startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")),
+                )
+            }
+        }
+        AccessRow(
+            title = "Video playback",
+            detail = "Notification access. Reads video playback, so autoplay counts as a stopping point.",
+            on = access.playback,
+            action = "Turn on",
+        ) { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+    }
+}
+
+@Composable
+fun Section(title: String, content: @Composable () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text(
             title.uppercase(),

@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">Sloota</string>
-    <string name="watch_label">Sloota logger</string>
-    <string name="watch_description">Records screen changes, scrolls and taps in YouTube, Instagram, TikTok and Reddit to a log on this phone, so Sloota can learn where natural stopping points are. Nothing leaves the phone unless you share the log.</string>
-    <string name="media_label">Sloota playback logger</string>
+    <string name="watch_label">Sloota</string>
+    <string name="watch_description">Times YouTube and Lurk, waits for a natural stopping point once your daily limit is up (the end of a video, the next short, backing out to the feed), then closes the app for the day. It also keeps a log of YouTube screens on this phone to tune those stopping points; nothing leaves the phone unless you share it.</string>
+    <string name="media_label">Sloota playback</string>
     <string name="tile_label">Mark stop</string>
 </resources>

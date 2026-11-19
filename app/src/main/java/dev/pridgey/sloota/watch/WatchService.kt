@@ -15,13 +15,17 @@ import android.view.accessibility.AccessibilityNodeInfo
 import androidx.core.content.ContextCompat
 import dev.pridgey.sloota.State
 import dev.pridgey.sloota.Targets
+import dev.pridgey.sloota.gate.EndOverlay
+import dev.pridgey.sloota.gate.Gate
+import dev.pridgey.sloota.gate.YouTubeRules
 import dev.pridgey.sloota.log.EventLog
 import dev.pridgey.sloota.log.NodeDump
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Logs what happens in the watched apps, so stopping-point rules can be written from real data:
+ * Runs the gate (see [Gate]): tracks which app is in front, spots YouTube's stopping points, and shows
+ * the end screen. It also logs what happens in the watched apps, so stopping-point rules can be written from real data:
  *
  * - foreground: which app is in front (all apps, so sessions have clear starts and ends)
  * - window:     a screen, dialog or pane changed in a watched app
@@ -30,9 +34,21 @@ import org.json.JSONObject
  * - snapshot:   the visible view tree, after windows change, scrolls settle, or the layout changes
  * - screen_on / screen_off / unlocked
  */
-class WatchService : AccessibilityService() {
+class WatchService : AccessibilityService(), Gate.Host {
 
     private val main = Handler(Looper.getMainLooper())
+    private lateinit var overlay: EndOverlay
+
+    private val ticker = object : Runnable {
+        override fun run() {
+            Gate.tick()
+            main.postDelayed(this, TICK_MS)
+        }
+    }
+
+    // --- YouTube screen, for "back to the feed" ---
+    private var ytScreen: YouTubeRules.Screen? = null
+    private val classifyRunnable = Runnable { classifyYouTube() }
 
     // --- Snapshots ---
     private var pendingReason: String? = null
@@ -55,9 +71,13 @@ class WatchService : AccessibilityService() {
                 Intent.ACTION_SCREEN_OFF -> {
                     flushScrolls(snapshot = false)
                     EventLog.write("screen_off", State.foreground)
+                    Gate.onScreen(false)
                 }
                 Intent.ACTION_SCREEN_ON -> EventLog.write("screen_on")
-                Intent.ACTION_USER_PRESENT -> EventLog.write("unlocked")
+                Intent.ACTION_USER_PRESENT -> {
+                    EventLog.write("unlocked")
+                    Gate.onScreen(true)
+                }
             }
         }
     }
@@ -75,10 +95,20 @@ class WatchService : AccessibilityService() {
             addAction(Intent.ACTION_USER_PRESENT)
         }
         ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        overlay = EndOverlay(this)
+        Gate.host = this
+        // After a restart, pick up where things were.
+        val active = rootInActiveWindow?.packageName?.toString()
+        State.foreground = active
+        Gate.onForeground(active)
+        main.post(ticker)
     }
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(screenReceiver) }
+        if (Gate.host === this) Gate.host = null
+        Gate.detach()
+        if (::overlay.isInitialized) overlay.dismiss()
         flushScrolls(snapshot = false)
         main.removeCallbacksAndMessages(null)
         EventLog.write("service_off")
@@ -91,11 +121,11 @@ class WatchService : AccessibilityService() {
         val pkg = event.packageName?.toString() ?: return
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> onWindowState(event, pkg)
-            AccessibilityEvent.TYPE_VIEW_SCROLLED -> if (Targets.isTarget(pkg)) onScroll(event, pkg)
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> if (Targets.isLogged(pkg)) onScroll(event, pkg)
             AccessibilityEvent.TYPE_VIEW_CLICKED,
-            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> if (Targets.isTarget(pkg)) onClick(event, pkg)
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> if (Targets.isLogged(pkg)) onClick(event, pkg)
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ->
-                if (Targets.isTarget(pkg) && pkg == State.foreground) requestSnapshot(REASON_CONTENT, 800)
+                if (Targets.isLogged(pkg) && pkg == State.foreground) requestSnapshot(REASON_CONTENT, 800)
         }
     }
 
@@ -108,8 +138,14 @@ class WatchService : AccessibilityService() {
             State.foreground = active
             lastSignature = 0
             lastContentHash = 0
+            ytScreen = null
+            Gate.onForeground(active)
         }
-        if (Targets.isTarget(pkg)) {
+        if (pkg == YouTubeRules.PKG) {
+            main.removeCallbacks(classifyRunnable)
+            main.postDelayed(classifyRunnable, CLASSIFY_DELAY_MS)
+        }
+        if (Targets.isLogged(pkg)) {
             EventLog.write("window", pkg) {
                 put("cls", event.className?.toString())
                 event.text.joinToString(" | ").takeIf { it.isNotBlank() }?.let { put("txt", NodeDump.clip(it)) }
@@ -143,7 +179,14 @@ class WatchService : AccessibilityService() {
     private fun flushScrolls(snapshot: Boolean) {
         main.removeCallbacks(settleRunnable)
         if (scrolls.isEmpty()) return
-        scrolls.values.forEach { run -> EventLog.write("scroll", run.pkg) { run.writeTo(this) } }
+        scrolls.values.forEach { run ->
+            EventLog.write("scroll", run.pkg) { run.writeTo(this) }
+            if (run.pkg == YouTubeRules.PKG &&
+                YouTubeRules.isNextShort(run.id, run.dy, run.startScrollY, run.scrollY, resources.displayMetrics.heightPixels)
+            ) {
+                Gate.stoppingPoint(run.pkg, "next_short")
+            }
+        }
         scrolls.clear()
         if (snapshot) requestSnapshot(REASON_SCROLL, 0)
     }
@@ -165,7 +208,7 @@ class WatchService : AccessibilityService() {
         }
         val root = rootInActiveWindow ?: return
         val pkg = root.packageName?.toString()
-        if (!Targets.isTarget(pkg)) return
+        if (!Targets.isLogged(pkg)) return
 
         val snap = NodeDump.dump(root)
         // Content changes only matter when the screen's layout changed (e.g. opened a post).
@@ -188,17 +231,19 @@ class WatchService : AccessibilityService() {
         private val startedAt = SystemClock.uptimeMillis()
         private var lastAt = startedAt
         private val cls = (source?.className ?: first.className)?.toString()?.substringAfterLast('.')
-        private val id = source?.viewIdResourceName?.substringAfter(":id/")
+        val id = source?.viewIdResourceName?.substringAfter(":id/")
         private val bounds = Rect().also { source?.getBoundsInScreen(it) }
         private val startFirst = first.fromIndex
-        private val startScrollY = first.scrollY
+        val startScrollY = first.scrollY
         private var firstVisible = first.fromIndex
         private var lastVisible = first.toIndex
         private var items = first.itemCount
-        private var scrollY = first.scrollY
+        var scrollY = first.scrollY
+            private set
         private var maxScrollY = first.maxScrollY
         private var dx = 0
-        private var dy = 0
+        var dy = 0
+            private set
         private var events = 0
 
         fun add(e: AccessibilityEvent) {
@@ -233,7 +278,47 @@ class WatchService : AccessibilityService() {
         }
     }
 
+    // --- Gate.Host ---
+
+    override fun midContent(app: Targets.App): Boolean = when (app) {
+        Targets.youtube -> {
+            classifyYouTube()
+            ytScreen != YouTubeRules.Screen.FEED || MediaWatch.isPlaying(YouTubeRules.PKG)
+        }
+        // Lurk tells us its own stopping points; until one comes, assume it's mid-post.
+        else -> true
+    }
+
+    override fun endSession(app: Targets.App, why: Gate.EndKind) {
+        app.packages.forEach { MediaWatch.pause(it) }
+        val (title, body) = when (why) {
+            Gate.EndKind.STOPPING_POINT -> "You did it." to "Good place to stop. That's ${app.name} for today."
+            Gate.EndKind.HARD_CAP -> "That's time." to "${app.name} is done for today."
+            Gate.EndKind.BLOCKED -> "${app.name} is done for today." to "See you tomorrow."
+        }
+        overlay.show(title, body)
+        performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+
+    /** Works out which YouTube screen is showing; a video or Shorts giving way to a feed is a stopping point. */
+    private fun classifyYouTube() {
+        main.removeCallbacks(classifyRunnable)
+        val root = rootInActiveWindow ?: return
+        if (root.packageName?.toString() != YouTubeRules.PKG) return
+        val hasReel = root.findAccessibilityNodeInfosByViewId("${YouTubeRules.PKG}:id/reel_recycler").isNotEmpty()
+        val player = root.findAccessibilityNodeInfosByViewId("${YouTubeRules.PKG}:id/watch_player").firstOrNull()
+        val width = resources.displayMetrics.widthPixels.coerceAtLeast(1)
+        val fraction = player?.let { Rect().also(it::getBoundsInScreen).width().toFloat() / width } ?: 0f
+        val screen = YouTubeRules.screen(hasReel, fraction)
+        val from = ytScreen
+        ytScreen = screen
+        if (from != screen) EventLog.write("yt_screen", YouTubeRules.PKG) { put("screen", screen.name) }
+        if (YouTubeRules.isBackToFeed(from, screen)) Gate.stoppingPoint(YouTubeRules.PKG, "back_to_feed")
+    }
+
     private companion object {
+        const val TICK_MS = 1000L
+        const val CLASSIFY_DELAY_MS = 400L
         const val REASON_WINDOW = "window"
         const val REASON_SCROLL = "scroll"
         const val REASON_CONTENT = "content"

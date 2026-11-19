@@ -4,14 +4,36 @@
 (finishing a video, backing out of a post, a scroll settling) instead of cutting you off mid-thing,
 then ends the session for good. More time sits behind deliberate friction.
 
-## Stage 1: logger
+## How it works
 
-Before writing per-app rules, this build only **records** what YouTube, Instagram, TikTok and Reddit
-report through Android's accessibility and media-session APIs, plus your own "this is a good stop" marks.
+Set a daily limit for **YouTube** or **Lurk** in Sloota. When it runs out, nothing interrupts you: Sloota waits for the next
+natural stopping point, then shows a "you did it" screen, pauses playback and sends the app home for the rest of the day.
+Days start at 4 AM.
+
+| App | Stopping points |
+|---|---|
+| YouTube | swiping to the next short, autoplay moving to a new video, backing out of a video or Shorts to a feed |
+| Lurk | reported by Lurk itself (see below) |
+| any | leaving the app, turning the screen off; after 3 minutes without one it ends anyway |
+
+**Limits.** Lowering a limit takes effect right away; raising one (or turning it off) starts tomorrow.
+**More time** only lives in Sloota: open the app's page, pick an amount, press and hold.
+The home screen counts days under the limit, times you hit your Sloota, and times you went back for more.
+
+**Lurk integration.** Lurk sends its stopping points as a broadcast:
+```kotlin
+sendBroadcast(Intent("dev.pridgey.sloota.STOPPING_POINT")
+    .setPackage("dev.pridgey.sloota")
+    .putExtra("pkg", packageName)
+    .putExtra("reason", "left_post"))
+```
+It's only acted on while that app is in front and past its limit, so it needs no permission.
+
+The logger from stage 1 still runs for YouTube, to keep tuning the rules.
 
 ### Setup on the phone
 1. Install the APK from the latest [release](https://github.com/pridgey/Sloota/releases/latest). Sloota updates itself from releases after that.
-2. Open Sloota → **Watch apps** → turn on *Sloota logger*.
+2. Open Sloota → **Watch apps** → turn on *Sloota*.
    If the switch is greyed out (sideloaded app, Android 13+): App info → ⋮ → *Allow restricted settings*.
 3. **Video playback** → allow notification access for Sloota.
 4. Add the **Mark stop** Quick Settings tile. Tap it whenever stopping would feel natural.
