@@ -16,6 +16,11 @@ Days start at 4 AM.
 | Lurk | reported by Lurk itself (see below) |
 | any | leaving the app, turning the screen off |
 
+**Open hours** (per app): only allow the app during a time range, which can run past midnight. Outside it the app
+stays closed, and More time can't open it. When the hours end mid-session, the app winds down to the next stopping
+point like a limit does. With a daily limit too, the limit only counts inside the hours and whichever runs out first
+ends the session. Changes to hours apply right away.
+**Stop screen** stays up until you tap Okay (which goes home) or navigate away. Sloota holds audio focus while it's up.
 **Hard cap** (per app, off by default): end anyway if no stopping point comes within 3, 5, 10 or 15 minutes.
 **Limits.** Lowering a limit takes effect right away; raising one (or turning it off) starts tomorrow.
 **More time** only lives in Sloota: open the app's page, pick an amount, press and hold.

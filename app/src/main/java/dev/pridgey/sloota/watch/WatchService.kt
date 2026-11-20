@@ -17,6 +17,8 @@ import dev.pridgey.sloota.State
 import dev.pridgey.sloota.Targets
 import dev.pridgey.sloota.gate.EndOverlay
 import dev.pridgey.sloota.gate.Gate
+import dev.pridgey.sloota.gate.Phase
+import dev.pridgey.sloota.gate.Rules
 import dev.pridgey.sloota.gate.YouTubeRules
 import dev.pridgey.sloota.log.EventLog
 import dev.pridgey.sloota.log.NodeDump
@@ -134,7 +136,11 @@ class WatchService : AccessibilityService(), Gate.Host {
 
     private fun onWindowState(event: AccessibilityEvent, pkg: String) {
         val active = rootInActiveWindow?.packageName?.toString() ?: pkg
+        // Our own stop screen isn't an app change.
+        if (active == packageName && ::overlay.isInitialized && overlay.isShowing) return
         if (active !in IGNORED_FOREGROUND && active != State.foreground) {
+            // Navigating away (home, another app) dismisses the stop screen.
+            if (::overlay.isInitialized) overlay.dismiss()
             flushScrolls(snapshot = false)
             val from = State.foreground
             EventLog.write("foreground", active) { put("from", from ?: JSONObject.NULL) }
@@ -294,15 +300,22 @@ class WatchService : AccessibilityService(), Gate.Host {
 
     override fun endSession(app: Targets.App, why: Gate.EndKind) {
         app.packages.forEach { MediaWatch.pause(it) }
-        val (title, body) = when (why) {
-            Gate.EndKind.STOPPING_POINT ->
-                "Done." to "You reached a natural stopping point, so ${app.name} is closed for the rest of today."
-            Gate.EndKind.HARD_CAP ->
-                "Time." to "No good stopping point came along, so ${app.name} is closed for the rest of today."
-            Gate.EndKind.BLOCKED -> "Closed." to "${app.name} is done for today. See you tomorrow."
+        val day = Gate.day(app)
+        // Ended by its open hours rather than its budget: say when it opens again.
+        val closed = if (day.phase == Phase.DONE || !day.windowed) {
+            "closed for the rest of today"
+        } else {
+            "closed until ${Rules.clock(day.windowStart)}"
         }
-        overlay.show(title, body)
-        performGlobalAction(GLOBAL_ACTION_HOME)
+        val (title, body) = when (why) {
+            Gate.EndKind.STOPPING_POINT -> "Done." to "You reached a natural stopping point, so ${app.name} is $closed."
+            Gate.EndKind.HARD_CAP -> "Time." to "No good stopping point came along, so ${app.name} is $closed."
+            Gate.EndKind.BLOCKED -> "Closed." to "${app.name} is done for today. See you tomorrow."
+            Gate.EndKind.CLOSED_HOURS ->
+                "Closed." to "${app.name} is open ${Rules.clock(day.windowStart)} to ${Rules.clock(day.windowEnd)}."
+        }
+        // The app stays underneath until Okay (which goes home) or the user navigates away.
+        overlay.show(title, body) { performGlobalAction(GLOBAL_ACTION_HOME) }
     }
 
     /** Works out which YouTube screen is showing; a video or Shorts giving way to a feed is a stopping point. */

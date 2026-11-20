@@ -27,7 +27,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -63,6 +69,7 @@ import dev.pridgey.sloota.gate.Phase
 import dev.pridgey.sloota.gate.Rules
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.time.LocalTime
 
 private val LIMIT_CHOICES = listOf(0, 15, 30, 45, 60, 90, 120)
 private val CAP_CHOICES = listOf(0, 3, 5, 10, 15)
@@ -94,11 +101,17 @@ fun minutes(ms: Long): String {
 
 private fun limitLabel(min: Int) = if (min == 0) "Off" else minutes(min * 60_000L)
 
+private fun minuteNow(): Int = LocalTime.now().let { it.hour * 60 + it.minute }
+
+private fun hoursLabel(start: Int, end: Int) = "${Rules.clock(start)} – ${Rules.clock(end)}"
+
 private fun status(day: AppDay): String = when {
-    !day.limited -> "No limit · ${minutes(day.usedMs)} today"
     day.phase == Phase.DONE -> "Done for today"
     day.phase == Phase.WINDING_DOWN -> "Wrapping up at the next good stop"
-    else -> "${minutes(day.usedMs)} of ${minutes(day.budgetMs)}"
+    day.windowed && !Rules.inWindow(day, minuteNow()) -> "Opens at ${Rules.clock(day.windowStart)}"
+    day.limited -> "${minutes(day.usedMs)} of ${minutes(day.budgetMs)}"
+    day.windowed -> "Open until ${Rules.clock(day.windowEnd)} · ${minutes(day.usedMs)} today"
+    else -> "No limit · ${minutes(day.usedMs)} today"
 }
 
 // --- Home pieces ---
@@ -179,6 +192,9 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
     val day = remember(version) { Gate.day(app) }
     val configured = remember(version) { Gate.limitMinutes(app) }
     val cap = remember(version) { Gate.capMinutes(app) }
+    val hours = remember(version) { Gate.windowConfigured(app) }
+    val openNow = remember(version) { Gate.inHours(app) }
+    var editingHours by remember(app.id) { mutableStateOf(false) }
     val stats = remember(version) { Gate.stats(app) }
     var more by remember(app.id) { mutableStateOf<Int?>(null) }
 
@@ -232,6 +248,29 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
                 )
             }
 
+            Section("Open hours") {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        hours?.let { hoursLabel(it.first, it.second) } ?: "Any time",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedButton(onClick = { editingHours = true }) { Text(if (hours == null) "Set hours" else "Change") }
+                    if (hours != null) TextButton(onClick = { Gate.setWindow(app, null) }) { Text("Remove") }
+                }
+                Text(
+                    when {
+                        hours == null -> "Only allow ${app.name} during set hours."
+                        day.limited -> "Your daily limit only counts inside these hours. Whichever runs out first ends the " +
+                            "session at a good place to stop. Outside these hours ${app.name} stays closed."
+                        else -> "When the hours end, ${app.name} keeps going until a good place to stop, then closes " +
+                            "until they open again."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             Section("Hard cap") {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     CAP_CHOICES.forEach { min ->
@@ -254,7 +293,15 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
                 )
             }
 
-            if (day.limited) {
+            if (day.limited && !openNow) {
+                Section("More time today") {
+                    Text(
+                        "${app.name} is outside its open hours, so there's no more time until ${Rules.clock(day.windowStart)}.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else if (day.limited) {
                 Section("More time today") {
                     Text(
                         "Pick how much, then press and hold.",
@@ -289,6 +336,55 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
             }
         }
     }
+
+    if (editingHours) {
+        HoursDialog(
+            initial = hours ?: (18 * 60 to 21 * 60),
+            onDismiss = { editingHours = false },
+            onSave = {
+                Gate.setWindow(app, it)
+                editingHours = false
+            },
+        )
+    }
+}
+
+/** Two steps: pick when the hours start, then when they end. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HoursDialog(initial: Pair<Int, Int>, onDismiss: () -> Unit, onSave: (Pair<Int, Int>) -> Unit) {
+    var start by remember { mutableStateOf<Int?>(null) }
+    val pickingEnd = start != null
+    val state = rememberTimePickerState(initialHour = initial.first / 60, initialMinute = initial.first % 60)
+    // Moving to the second step: show the end time.
+    LaunchedEffect(pickingEnd) {
+        if (pickingEnd) {
+            state.hour = initial.second / 60
+            state.minute = initial.second % 60
+        }
+    }
+    val picked = state.hour * 60 + state.minute
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (pickingEnd) "Open until" else "Open from") },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                TimePicker(state = state)
+                if (pickingEnd && picked == start) {
+                    Text("Pick a different time from the start.", color = MaterialTheme.colorScheme.error)
+                } else if (pickingEnd && picked < start!!) {
+                    Text("Runs past midnight.", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !pickingEnd || picked != start,
+                onClick = { if (pickingEnd) onSave(start!! to picked) else start = picked },
+            ) { Text(if (pickingEnd) "Save" else "Next") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /** A button that only fires after being held down for [holdMs]. Letting go early drains it back. */

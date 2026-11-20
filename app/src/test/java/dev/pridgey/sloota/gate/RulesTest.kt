@@ -89,6 +89,59 @@ class RulesTest {
         assertEquals(Rules.Stats(underDays = 1, hits = 2, extensions = 1), Rules.stats(days, "2026-11-18"))
         assertEquals(Rules.Stats(0, 0, 0), Rules.stats(days, "2026-11-18", "lurk"))
     }
+
+    // --- Open hours ---
+
+    private fun h(hour: Int, minute: Int = 0) = hour * 60 + minute
+
+    @Test
+    fun `open hours, same day and overnight`() {
+        val evening = AppDay(windowStart = h(18), windowEnd = h(21))
+        assertTrue(Rules.inWindow(evening, h(18)))
+        assertTrue(Rules.inWindow(evening, h(20, 59)))
+        assertFalse(Rules.inWindow(evening, h(21)))
+        assertFalse(Rules.inWindow(evening, h(9)))
+        val late = AppDay(windowStart = h(22), windowEnd = h(1))
+        assertTrue(Rules.inWindow(late, h(23, 30)))
+        assertTrue(Rules.inWindow(late, h(0, 30)))
+        assertFalse(Rules.inWindow(late, h(1)))
+        assertTrue(Rules.inWindow(AppDay(), h(3)))
+    }
+
+    @Test
+    fun `hours ending winds down, then closes until they reopen`() {
+        val d = Rules.closeWindow(AppDay(windowStart = h(18), windowEnd = h(21), usedMs = 40 * min))
+        assertEquals(Phase.WINDING_DOWN, d.phase)
+        val ended = Rules.end(d)
+        assertEquals(Phase.OPEN, ended.phase)
+        assertEquals(1, ended.hits)
+    }
+
+    @Test
+    fun `with hours and a budget, a spent budget still closes the day`() {
+        var d = AppDay(limitMs = 30 * min, windowStart = h(18), windowEnd = h(21))
+        d = Rules.addUse(d, 30 * min)
+        assertEquals(Phase.WINDING_DOWN, d.phase)
+        assertEquals(Phase.DONE, Rules.end(d).phase)
+    }
+
+    @Test
+    fun `hours changes apply right away`() {
+        val set = Rules.applyWindow(AppDay(), h(18) to h(21))
+        assertEquals(h(18), set.windowStart)
+        assertEquals(h(6), Rules.applyWindow(set, h(6) to h(9)).windowStart)
+        assertFalse(Rules.applyWindow(set, null).windowed)
+        assertFalse(Rules.applyWindow(AppDay(), h(5) to h(5)).windowed)
+    }
+
+    @Test
+    fun `days with hours count as under when never closed`() {
+        val days = mapOf(
+            "2026-11-18" to mapOf("youtube" to AppDay(windowStart = h(18), windowEnd = h(21))),
+            "2026-11-19" to mapOf("youtube" to AppDay(windowStart = h(18), windowEnd = h(21), hits = 1)),
+        )
+        assertEquals(1, Rules.stats(days, "2026-11-20").underDays)
+    }
 }
 
 class YouTubeRulesTest {

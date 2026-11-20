@@ -35,6 +35,22 @@ class GateStore(context: Context) {
         prefs.edit().putString(KEY_CAPS, o.toString()).apply()
     }
 
+    /** App id → configured open hours (start, end) in minutes after midnight. Missing = any time. */
+    fun windows(): Map<String, Pair<Int, Int>> {
+        val o = JSONObject(prefs.getString(KEY_WINDOWS, "{}") ?: "{}")
+        return o.keys().asSequence().mapNotNull { id ->
+            val w = o.optJSONObject(id) ?: return@mapNotNull null
+            id to (w.optInt("s", -1) to w.optInt("e", -1))
+        }.toMap()
+    }
+
+    /** Pass null to remove the hours. */
+    fun setWindow(appId: String, window: Pair<Int, Int>?) {
+        val o = JSONObject(prefs.getString(KEY_WINDOWS, "{}") ?: "{}")
+        if (window == null) o.remove(appId) else o.put(appId, JSONObject().put("s", window.first).put("e", window.second))
+        prefs.edit().putString(KEY_WINDOWS, o.toString()).apply()
+    }
+
     /** Day key → app id → record. */
     fun days(): MutableMap<String, MutableMap<String, AppDay>> {
         val root = JSONObject(prefs.getString(KEY_DAYS, "{}") ?: "{}")
@@ -64,6 +80,8 @@ class GateStore(context: Context) {
         windStartMs = o.optLong("wind"),
         hits = o.optInt("hits"),
         extensions = o.optInt("ext"),
+        windowStart = o.optInt("ws", -1),
+        windowEnd = o.optInt("we", -1),
     )
 
     private fun write(d: AppDay) = JSONObject()
@@ -74,10 +92,13 @@ class GateStore(context: Context) {
         .put("wind", d.windStartMs)
         .put("hits", d.hits)
         .put("ext", d.extensions)
+        .put("ws", d.windowStart)
+        .put("we", d.windowEnd)
 
     private companion object {
         const val KEY_LIMITS = "limits"
         const val KEY_DAYS = "days"
         const val KEY_CAPS = "caps"
+        const val KEY_WINDOWS = "windows"
     }
 }
