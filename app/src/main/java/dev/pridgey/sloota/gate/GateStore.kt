@@ -23,6 +23,18 @@ class GateStore(context: Context) {
         prefs.edit().putString(KEY_LIMITS, o.toString()).apply()
     }
 
+    /** App id → hard cap in minutes (0 = off, the default). */
+    fun caps(): Map<String, Int> {
+        val o = JSONObject(prefs.getString(KEY_CAPS, "{}") ?: "{}")
+        return o.keys().asSequence().associateWith { o.optInt(it) }
+    }
+
+    fun setCap(appId: String, minutes: Int) {
+        val o = JSONObject(prefs.getString(KEY_CAPS, "{}") ?: "{}")
+        o.put(appId, minutes)
+        prefs.edit().putString(KEY_CAPS, o.toString()).apply()
+    }
+
     /** Day key → app id → record. */
     fun days(): MutableMap<String, MutableMap<String, AppDay>> {
         val root = JSONObject(prefs.getString(KEY_DAYS, "{}") ?: "{}")
@@ -66,5 +78,6 @@ class GateStore(context: Context) {
     private companion object {
         const val KEY_LIMITS = "limits"
         const val KEY_DAYS = "days"
+        const val KEY_CAPS = "caps"
     }
 }

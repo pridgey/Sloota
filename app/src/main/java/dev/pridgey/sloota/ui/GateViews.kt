@@ -65,6 +65,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val LIMIT_CHOICES = listOf(0, 15, 30, 45, 60, 90, 120)
+private val CAP_CHOICES = listOf(0, 3, 5, 10, 15)
 private val MORE_CHOICES = listOf(5, 10, 15, 30)
 
 /** Re-reads the gate whenever it saves, and every few seconds so today's minutes stay current. */
@@ -177,6 +178,7 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
     val version = rememberGateVersion()
     val day = remember(version) { Gate.day(app) }
     val configured = remember(version) { Gate.limitMinutes(app) }
+    val cap = remember(version) { Gate.capMinutes(app) }
     val stats = remember(version) { Gate.stats(app) }
     var more by remember(app.id) { mutableStateOf<Int?>(null) }
 
@@ -224,6 +226,28 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
                     } else {
                         "When time's up, ${app.name} keeps going until a good place to stop (the end of a video, " +
                             "backing out of a post), then closes for the day. Lower limits start now; higher ones start tomorrow."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Section("Hard cap") {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CAP_CHOICES.forEach { min ->
+                        FilterChip(
+                            selected = cap == min,
+                            onClick = { Gate.setCap(app, min) },
+                            label = { Text(limitLabel(min)) },
+                        )
+                    }
+                }
+                Text(
+                    if (cap == 0) {
+                        "Off: once time's up, ${app.name} waits for a good place to stop, however long that takes."
+                    } else {
+                        "If no good place to stop comes within ${minutes(cap * 60_000L)} of time running out, " +
+                            "${app.name} closes anyway."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

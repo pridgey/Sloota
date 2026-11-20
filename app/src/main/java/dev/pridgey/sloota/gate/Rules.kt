@@ -32,8 +32,6 @@ data class AppDay(
 }
 
 object Rules {
-    /** How long a wind-down may wait for a stopping point before ending anyway. */
-    const val HARD_CAP_MS = 3 * 60_000L
 
     /** Days roll over at 4 AM, so a late-night session counts toward the evening it started in. */
     const val DAY_START_HOUR = 4L
@@ -52,8 +50,12 @@ object Rules {
         }
     }
 
-    fun pastHardCap(day: AppDay): Boolean =
-        day.phase == Phase.WINDING_DOWN && day.usedMs - day.windStartMs >= HARD_CAP_MS
+    /**
+     * True once a wind-down has waited [capMs] for a stopping point. A cap of 0 (the default) means no
+     * cap: the wind-down waits for a real stopping point however long it takes.
+     */
+    fun pastHardCap(day: AppDay, capMs: Long): Boolean =
+        capMs > 0 && day.phase == Phase.WINDING_DOWN && day.usedMs - day.windStartMs >= capMs
 
     /** The session ends at a stopping point (or the cap). Only counts as a hit if it was winding down. */
     fun end(day: AppDay): AppDay =

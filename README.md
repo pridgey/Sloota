@@ -14,8 +14,9 @@ Days start at 4 AM.
 |---|---|
 | YouTube | swiping to the next short, autoplay moving to a new video, backing out of a video or Shorts to a feed |
 | Lurk | reported by Lurk itself (see below) |
-| any | leaving the app, turning the screen off; after 3 minutes without one it ends anyway |
+| any | leaving the app, turning the screen off |
 
+**Hard cap** (per app, off by default): end anyway if no stopping point comes within 3, 5, 10 or 15 minutes.
 **Limits.** Lowering a limit takes effect right away; raising one (or turning it off) starts tomorrow.
 **More time** only lives in Sloota: open the app's page, pick an amount, press and hold.
 The home screen counts days under the limit, times you hit your Sloota, and times you went back for more.

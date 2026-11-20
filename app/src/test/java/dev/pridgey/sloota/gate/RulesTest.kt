@@ -28,9 +28,18 @@ class RulesTest {
         assertEquals(Phase.OPEN, d.phase)
         d = Rules.addUse(d, 1 * min)
         assertEquals(Phase.WINDING_DOWN, d.phase)
-        assertFalse(Rules.pastHardCap(d))
-        d = Rules.addUse(d, Rules.HARD_CAP_MS)
-        assertTrue(Rules.pastHardCap(d))
+        assertFalse(Rules.pastHardCap(d, 3 * min))
+        d = Rules.addUse(d, 3 * min)
+        assertTrue(Rules.pastHardCap(d, 3 * min))
+        assertFalse(Rules.pastHardCap(d, 5 * min))
+    }
+
+    @Test
+    fun `no hard cap waits for a stopping point however long it takes`() {
+        var d = Rules.addUse(AppDay(limitMs = 15 * min), 15 * min)
+        d = Rules.addUse(d, 120 * min)
+        assertEquals(Phase.WINDING_DOWN, d.phase)
+        assertFalse(Rules.pastHardCap(d, 0))
     }
 
     @Test

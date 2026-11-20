@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Runs the limits: counts time while a gated app is in front, starts the wind-down when the budget
- * runs out, and ends the session at the next stopping point (or the hard cap).
+ * runs out, and ends the session at the next stopping point (or the hard cap, if one is set).
  *
  * Everything here runs on the main thread (accessibility events, broadcasts, the UI).
  */
@@ -35,6 +35,7 @@ object Gate {
     private lateinit var store: GateStore
     private var days = mutableMapOf<String, MutableMap<String, AppDay>>()
     private var limits = mapOf<String, Int>()
+    private var caps = mapOf<String, Int>()
 
     private val _changes = MutableStateFlow(0)
     /** Bumps whenever something the UI shows changes. */
@@ -54,6 +55,7 @@ object Gate {
         power = context.getSystemService(PowerManager::class.java)
         keyguard = context.getSystemService(KeyguardManager::class.java)
         limits = store.limits()
+        caps = store.caps()
         days = store.days()
     }
 
@@ -62,6 +64,9 @@ object Gate {
     fun today(): String = Rules.dayKey(System.currentTimeMillis())
 
     fun limitMinutes(app: Targets.App): Int = limits[app.id] ?: 0
+
+    /** Hard cap in minutes; 0 = off (wait for a real stopping point). */
+    fun capMinutes(app: Targets.App): Int = caps[app.id] ?: 0
 
     fun day(app: Targets.App): AppDay = todayRecords().getValue(app.id)
 
@@ -82,6 +87,14 @@ object Gate {
         today[app.id] = Rules.applyLimit(today.getValue(app.id), minutes * 60_000L)
         EventLog.write("gate_limit", app.packages.first()) { put("min", minutes) }
         save(force = true)
+    }
+
+    /** Applies right away, including to a wind-down in progress. */
+    fun setCap(app: Targets.App, minutes: Int) {
+        store.setCap(app.id, minutes)
+        caps = store.caps()
+        EventLog.write("gate_cap", app.packages.first()) { put("min", minutes) }
+        changed()
     }
 
     fun addTime(app: Targets.App, minutes: Int) {
@@ -146,7 +159,7 @@ object Gate {
             // Nothing in progress (a feed, a menu): this is already a fine place to stop.
             if (host?.midContent(app) == false) endIfWinding(app, "not_mid_content", show = true)
             changed()
-        } else if (Rules.pastHardCap(now)) {
+        } else if (Rules.pastHardCap(now, capMinutes(app) * 60_000L)) {
             end(app, "hard_cap", EndKind.HARD_CAP)
         }
         save(force = false)
