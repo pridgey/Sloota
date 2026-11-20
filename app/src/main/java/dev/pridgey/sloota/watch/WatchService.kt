@@ -292,9 +292,11 @@ class WatchService : AccessibilityService(), Gate.Host {
     override fun endSession(app: Targets.App, why: Gate.EndKind) {
         app.packages.forEach { MediaWatch.pause(it) }
         val (title, body) = when (why) {
-            Gate.EndKind.STOPPING_POINT -> "You did it." to "Good place to stop. That's ${app.name} for today."
-            Gate.EndKind.HARD_CAP -> "That's time." to "${app.name} is done for today."
-            Gate.EndKind.BLOCKED -> "${app.name} is done for today." to "See you tomorrow."
+            Gate.EndKind.STOPPING_POINT ->
+                "Done." to "You reached a natural stopping point, so ${app.name} is closed for the rest of today."
+            Gate.EndKind.HARD_CAP ->
+                "Time." to "No good stopping point came along, so ${app.name} is closed for the rest of today."
+            Gate.EndKind.BLOCKED -> "Closed." to "${app.name} is done for today. See you tomorrow."
         }
         overlay.show(title, body)
         performGlobalAction(GLOBAL_ACTION_HOME)
