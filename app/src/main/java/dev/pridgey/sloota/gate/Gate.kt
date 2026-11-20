@@ -1,6 +1,8 @@
 package dev.pridgey.sloota.gate
 
+import android.app.KeyguardManager
 import android.content.Context
+import android.os.PowerManager
 import android.os.SystemClock
 import dev.pridgey.sloota.Targets
 import dev.pridgey.sloota.log.EventLog
@@ -41,13 +43,16 @@ object Gate {
     var host: Host? = null
 
     private var current: Targets.App? = null
-    private var screenOn = true
+    private var power: PowerManager? = null
+    private var keyguard: KeyguardManager? = null
     private var lastTick = 0L
     private var lastSave = 0L
     private var dirty = false
 
     fun init(context: Context) {
         store = GateStore(context)
+        power = context.getSystemService(PowerManager::class.java)
+        keyguard = context.getSystemService(KeyguardManager::class.java)
         limits = store.limits()
         days = store.days()
     }
@@ -112,11 +117,12 @@ object Gate {
         save(force = true)
     }
 
-    /** [on] is true once the phone is unlocked (lock-screen time doesn't count), false when the screen turns off. */
+    /**
+     * The screen turned on, off, or the phone was unlocked. Whether time counts is read from the
+     * system on every tick (see [inUse]), so this only settles the time so far and ends a wind-down.
+     */
     fun onScreen(on: Boolean) {
         accrue()
-        screenOn = on
-        lastTick = SystemClock.elapsedRealtime()
         if (!on) current?.let { endIfWinding(it, "screen_off", show = false) }
         save(force = !on)
     }
@@ -163,7 +169,7 @@ object Gate {
     private fun accrue() {
         val now = SystemClock.elapsedRealtime()
         val app = current
-        if (app != null && screenOn && lastTick > 0) {
+        if (app != null && inUse() && lastTick > 0) {
             // Big gaps mean we missed events (service restarted, phone asleep); don't count them.
             val delta = (now - lastTick).takeIf { it in 1..MAX_GAP_MS } ?: 0L
             if (delta > 0) {
@@ -174,6 +180,13 @@ object Gate {
         }
         lastTick = now
     }
+
+    /**
+     * True while the screen is on and unlocked. Asked of the system each time rather than tracked from
+     * broadcasts: some phones never deliver ACTION_USER_PRESENT, which left counting stuck off.
+     */
+    private fun inUse(): Boolean =
+        power?.isInteractive != false && keyguard?.isKeyguardLocked != true
 
     /** Today's records, creating any that are missing with the configured limits. */
     private fun todayRecords(): MutableMap<String, AppDay> {

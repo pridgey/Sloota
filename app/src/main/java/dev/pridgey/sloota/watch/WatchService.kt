@@ -73,7 +73,10 @@ class WatchService : AccessibilityService(), Gate.Host {
                     EventLog.write("screen_off", State.foreground)
                     Gate.onScreen(false)
                 }
-                Intent.ACTION_SCREEN_ON -> EventLog.write("screen_on")
+                Intent.ACTION_SCREEN_ON -> {
+                    EventLog.write("screen_on")
+                    Gate.onScreen(true)
+                }
                 Intent.ACTION_USER_PRESENT -> {
                     EventLog.write("unlocked")
                     Gate.onScreen(true)
