@@ -64,12 +64,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.pridgey.sloota.Targets
 import dev.pridgey.sloota.gate.AppDay
+import dev.pridgey.sloota.gate.DayHours
 import dev.pridgey.sloota.gate.Gate
 import dev.pridgey.sloota.gate.Phase
 import dev.pridgey.sloota.gate.Rules
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.time.LocalTime
+import java.time.DayOfWeek
+import java.time.format.TextStyle
+import java.util.Locale
 
 private val LIMIT_CHOICES = listOf(0, 15, 30, 45, 60, 90, 120)
 private val CAP_CHOICES = listOf(0, 3, 5, 10, 15)
@@ -101,16 +104,21 @@ fun minutes(ms: Long): String {
 
 private fun limitLabel(min: Int) = if (min == 0) "Off" else minutes(min * 60_000L)
 
-private fun minuteNow(): Int = LocalTime.now().let { it.hour * 60 + it.minute }
+private val WEEKDAYS = setOf(DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY, DayOfWeek.THURSDAY, DayOfWeek.FRIDAY)
+private val WEEKEND = setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY)
 
-private fun hoursLabel(start: Int, end: Int) = "${Rules.clock(start)} – ${Rules.clock(end)}"
+private fun hoursLabel(rule: DayHours) = when (rule) {
+    DayHours.AnyTime -> "Any time"
+    DayHours.Closed -> "Closed"
+    is DayHours.Open -> "${Rules.clock(rule.start)} – ${Rules.clock(rule.end)}" + if (rule.overnight) " next day" else ""
+}
 
-private fun status(day: AppDay): String = when {
+private fun status(app: Targets.App, day: AppDay): String = when {
     day.phase == Phase.DONE -> "Done for today"
     day.phase == Phase.WINDING_DOWN -> "Wrapping up at the next good stop"
-    day.windowed && !Rules.inWindow(day, minuteNow()) -> "Opens at ${Rules.clock(day.windowStart)}"
+    !Gate.inHours(app) -> Gate.opensLabel(app)?.let { "Opens $it" } ?: "Closed"
     day.limited -> "${minutes(day.usedMs)} of ${minutes(day.budgetMs)}"
-    day.windowed -> "Open until ${Rules.clock(day.windowEnd)} · ${minutes(day.usedMs)} today"
+    Gate.closesLabel(app) != null -> "Open until ${Gate.closesLabel(app)} · ${minutes(day.usedMs)} today"
     else -> "No limit · ${minutes(day.usedMs)} today"
 }
 
@@ -162,7 +170,7 @@ fun AppTodayRow(app: Targets.App, day: AppDay, onClick: () -> Unit) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(app.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                Text(status(day), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(status(app, day), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (day.limited) UsageBar(day)
         }
@@ -192,9 +200,9 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
     val day = remember(version) { Gate.day(app) }
     val configured = remember(version) { Gate.limitMinutes(app) }
     val cap = remember(version) { Gate.capMinutes(app) }
-    val hours = remember(version) { Gate.windowConfigured(app) }
+    val week = remember(version) { Gate.weekHours(app) }
     val openNow = remember(version) { Gate.inHours(app) }
-    var editingHours by remember(app.id) { mutableStateOf(false) }
+    var editingHours by remember(app.id) { mutableStateOf<Pair<Set<DayOfWeek>, DayHours>?>(null) }
     val stats = remember(version) { Gate.stats(app) }
     var more by remember(app.id) { mutableStateOf<Int?>(null) }
 
@@ -214,7 +222,7 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
 
             Section("Today") {
                 Text(minutes(day.usedMs), style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.SemiBold)
-                Text(status(day), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(status(app, day), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (day.limited) UsageBar(day)
                 if (day.extraMs > 0) {
                     Text(
@@ -249,18 +257,33 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
             }
 
             Section("Open hours") {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        hours?.let { hoursLabel(it.first, it.second) } ?: "Any time",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.weight(1f),
-                    )
-                    OutlinedButton(onClick = { editingHours = true }) { Text(if (hours == null) "Set hours" else "Change") }
-                    if (hours != null) TextButton(onClick = { Gate.setWindow(app, null) }) { Text("Remove") }
+                if (week.isEmpty()) {
+                    Text("Any time", style = MaterialTheme.typography.titleMedium)
+                } else {
+                    Rules.groups(week).forEach { (days, rule) ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { editingHours = days.toSet() to rule }
+                                .padding(vertical = 10.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(Rules.daysLabel(days), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                            Text(hoursLabel(rule), style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = {
+                        editingHours = if (week.isEmpty()) DayOfWeek.entries.toSet() to DayHours.Open(18 * 60, 21 * 60)
+                        else emptySet<DayOfWeek>() to DayHours.Open(18 * 60, 21 * 60)
+                    }) { Text(if (week.isEmpty()) "Set hours" else "Set other days") }
+                    if (week.isNotEmpty()) TextButton(onClick = { Gate.clearHours(app) }) { Text("Remove all") }
                 }
                 Text(
                     when {
-                        hours == null -> "Only allow ${app.name} during set hours."
+                        week.isEmpty() -> "Only allow ${app.name} during set hours."
                         day.limited -> "Your daily limit only counts inside these hours. Whichever runs out first ends the " +
                             "session at a good place to stop. Outside these hours ${app.name} stays closed."
                         else -> "When the hours end, ${app.name} keeps going until a good place to stop, then closes " +
@@ -296,7 +319,8 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
             if (day.limited && !openNow) {
                 Section("More time today") {
                     Text(
-                        "${app.name} is outside its open hours, so there's no more time until ${Rules.clock(day.windowStart)}.",
+                        "${app.name} is outside its open hours, so there's no more time" +
+                            (Gate.opensLabel(app)?.let { " until $it." } ?: "."),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -337,53 +361,129 @@ fun AppScreen(app: Targets.App, onBack: () -> Unit) {
         }
     }
 
-    if (editingHours) {
+    editingHours?.let { (days, rule) ->
         HoursDialog(
-            initial = hours ?: (18 * 60 to 21 * 60),
-            onDismiss = { editingHours = false },
-            onSave = {
-                Gate.setWindow(app, it)
-                editingHours = false
+            initialDays = days,
+            initialRule = rule,
+            onDismiss = { editingHours = null },
+            onSave = { chosen, newRule ->
+                Gate.setDayHours(app, chosen, newRule)
+                editingHours = null
             },
         )
     }
 }
 
-/** Two steps: pick when the hours start, then when they end. */
-@OptIn(ExperimentalMaterial3Api::class)
+private enum class HoursStep { DAYS, START, END }
+
+/** Pick the days and what they allow, then (for set hours) when they start and end. */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-private fun HoursDialog(initial: Pair<Int, Int>, onDismiss: () -> Unit, onSave: (Pair<Int, Int>) -> Unit) {
-    var start by remember { mutableStateOf<Int?>(null) }
-    val pickingEnd = start != null
-    val state = rememberTimePickerState(initialHour = initial.first / 60, initialMinute = initial.first % 60)
-    // Moving to the second step: show the end time.
-    LaunchedEffect(pickingEnd) {
-        if (pickingEnd) {
-            state.hour = initial.second / 60
-            state.minute = initial.second % 60
-        }
+private fun HoursDialog(
+    initialDays: Set<DayOfWeek>,
+    initialRule: DayHours,
+    onDismiss: () -> Unit,
+    onSave: (Set<DayOfWeek>, DayHours) -> Unit,
+) {
+    val seed = initialRule as? DayHours.Open ?: DayHours.Open(18 * 60, 21 * 60)
+    var step by remember { mutableStateOf(HoursStep.DAYS) }
+    var days by remember { mutableStateOf(initialDays) }
+    var rule by remember { mutableStateOf(initialRule) }
+    var start by remember { mutableIntStateOf(seed.start) }
+    val state = rememberTimePickerState(initialHour = seed.start / 60, initialMinute = seed.start % 60)
+    LaunchedEffect(step) {
+        val shown = if (step == HoursStep.END) seed.end else start
+        state.hour = shown / 60
+        state.minute = shown % 60
     }
     val picked = state.hour * 60 + state.minute
+    val usesTimes = rule is DayHours.Open
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (pickingEnd) "Open until" else "Open from") },
+        title = {
+            Text(
+                when (step) {
+                    HoursStep.DAYS -> "Which days?"
+                    HoursStep.START -> "Open from"
+                    HoursStep.END -> "Open until"
+                },
+            )
+        },
         text = {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                TimePicker(state = state)
-                if (pickingEnd && picked == start) {
-                    Text("Pick a different time from the start.", color = MaterialTheme.colorScheme.error)
-                } else if (pickingEnd && picked < start!!) {
-                    Text("Runs past midnight.", style = MaterialTheme.typography.bodySmall)
+            if (step == HoursStep.DAYS) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("Every day" to DayOfWeek.entries.toSet(), "Weekdays" to WEEKDAYS, "Weekend" to WEEKEND)
+                            .forEach { (label, set) ->
+                                FilterChip(selected = days == set, onClick = { days = set }, label = { Text(label) })
+                            }
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        DayOfWeek.entries.forEach { d ->
+                            FilterChip(
+                                selected = d in days,
+                                onClick = { days = if (d in days) days - d else days + d },
+                                label = { Text(d.getDisplayName(TextStyle.SHORT, Locale.getDefault())) },
+                            )
+                        }
+                    }
+                    Text("On these days", style = MaterialTheme.typography.labelLarge)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(selected = usesTimes, onClick = { rule = seed }, label = { Text("Set hours") })
+                        FilterChip(selected = rule == DayHours.AnyTime, onClick = { rule = DayHours.AnyTime }, label = { Text("Any time") })
+                        FilterChip(selected = rule == DayHours.Closed, onClick = { rule = DayHours.Closed }, label = { Text("Closed") })
+                    }
+                }
+            } else {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    TimePicker(state = state)
+                    val dayStart = Rules.clock(Rules.DAY_START_MIN)
+                    if (step == HoursStep.START && picked < Rules.DAY_START_MIN) {
+                        Text("Days start at $dayStart, so pick that or later.", color = MaterialTheme.colorScheme.error)
+                    } else if (step == HoursStep.END && picked == start) {
+                        Text("Pick a different time from the start.", color = MaterialTheme.colorScheme.error)
+                    } else if (step == HoursStep.END && !Rules.fitsDay(start, picked)) {
+                        Text("Hours can run until $dayStart the next day at the latest.", color = MaterialTheme.colorScheme.error)
+                    } else if (step == HoursStep.END && picked < start) {
+                        Text(
+                            "Ends the next day. ${Rules.clock(start)} to ${Rules.clock(picked)} stays with the day it started.",
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
             TextButton(
-                enabled = !pickingEnd || picked != start,
-                onClick = { if (pickingEnd) onSave(start!! to picked) else start = picked },
-            ) { Text(if (pickingEnd) "Save" else "Next") }
+                enabled = when (step) {
+                    HoursStep.DAYS -> days.isNotEmpty()
+                    HoursStep.START -> picked >= Rules.DAY_START_MIN
+                    HoursStep.END -> Rules.fitsDay(start, picked)
+                },
+                onClick = {
+                    when (step) {
+                        HoursStep.DAYS -> if (usesTimes) step = HoursStep.START else onSave(days, rule)
+                        HoursStep.START -> {
+                            start = picked
+                            step = HoursStep.END
+                        }
+                        HoursStep.END -> onSave(days, DayHours.Open(start, picked))
+                    }
+                },
+            ) { Text(if (step == HoursStep.END || (step == HoursStep.DAYS && !usesTimes)) "Save" else "Next") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = {
+            TextButton(
+                onClick = {
+                    when (step) {
+                        HoursStep.DAYS -> onDismiss()
+                        HoursStep.START -> step = HoursStep.DAYS
+                        HoursStep.END -> step = HoursStep.START
+                    }
+                },
+            ) { Text(if (step == HoursStep.DAYS) "Cancel" else "Back") }
+        },
     )
 }
 

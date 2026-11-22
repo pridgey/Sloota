@@ -302,17 +302,14 @@ class WatchService : AccessibilityService(), Gate.Host {
         app.packages.forEach { MediaWatch.pause(it) }
         val day = Gate.day(app)
         // Ended by its open hours rather than its budget: say when it opens again.
-        val closed = if (day.phase == Phase.DONE || !day.windowed) {
-            "closed for the rest of today"
-        } else {
-            "closed until ${Rules.clock(day.windowStart)}"
-        }
+        val opens = Gate.opensLabel(app)
+        val closed = if (day.phase == Phase.DONE || opens == null) "closed for the rest of today" else "closed until $opens"
         val (title, body) = when (why) {
             Gate.EndKind.STOPPING_POINT -> "Done." to "You reached a natural stopping point, so ${app.name} is $closed."
             Gate.EndKind.HARD_CAP -> "Time." to "No good stopping point came along, so ${app.name} is $closed."
             Gate.EndKind.BLOCKED -> "Closed." to "${app.name} is done for today. See you tomorrow."
             Gate.EndKind.CLOSED_HOURS ->
-                "Closed." to "${app.name} is open ${Rules.clock(day.windowStart)} to ${Rules.clock(day.windowEnd)}."
+                "Closed." to (opens?.let { "${app.name} opens again $it." } ?: "${app.name} has no open hours set.")
         }
         // The app stays underneath until Okay (which goes home) or the user navigates away.
         overlay.show(title, body) { performGlobalAction(GLOBAL_ACTION_HOME) }

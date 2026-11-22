@@ -8,7 +8,9 @@ import dev.pridgey.sloota.Targets
 import dev.pridgey.sloota.log.EventLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import java.time.LocalTime
+import java.time.DayOfWeek
+import java.time.LocalDate
+import java.time.LocalDateTime
 
 /**
  * Runs the limits: counts time while a gated app is in front, starts the wind-down when the budget
@@ -39,7 +41,7 @@ object Gate {
     private var days = mutableMapOf<String, MutableMap<String, AppDay>>()
     private var limits = mapOf<String, Int>()
     private var caps = mapOf<String, Int>()
-    private var windows = mapOf<String, Pair<Int, Int>>()
+    private var hours = mapOf<String, WeekHours>()
 
     private val _changes = MutableStateFlow(0)
     /** Bumps whenever something the UI shows changes. */
@@ -62,7 +64,7 @@ object Gate {
         keyguard = context.getSystemService(KeyguardManager::class.java)
         limits = store.limits()
         caps = store.caps()
-        windows = store.windows()
+        hours = store.hours()
         days = store.days()
     }
 
@@ -75,11 +77,23 @@ object Gate {
     /** Hard cap in minutes; 0 = off (wait for a real stopping point). */
     fun capMinutes(app: Targets.App): Int = caps[app.id] ?: 0
 
-    /** Configured open hours (start, end) in minutes after midnight, or null for any time. */
-    fun windowConfigured(app: Targets.App): Pair<Int, Int>? = windows[app.id]
+    /** The app's weekly open hours; empty means any time. */
+    fun weekHours(app: Targets.App): WeekHours = hours[app.id].orEmpty()
 
-    /** Whether the app is inside today's open hours right now (always true without hours). */
-    fun inHours(app: Targets.App): Boolean = Rules.inWindow(day(app), minuteNow())
+    /** Whether the schedule allows the app right now (always true without hours). */
+    fun inHours(app: Targets.App): Boolean = Rules.isOpen(weekHours(app), LocalDateTime.now())
+
+    /** When a closed app next opens, worded for display; null if it's open or never opens. */
+    fun opensLabel(app: Targets.App): String? {
+        val now = LocalDateTime.now()
+        return Rules.nextOpen(weekHours(app), now)?.let { Rules.whenLabel(it, now) }
+    }
+
+    /** When an open app's hours next end, worded for display; null if they don't. */
+    fun closesLabel(app: Targets.App): String? {
+        val now = LocalDateTime.now()
+        return Rules.closesAt(weekHours(app), now)?.let { Rules.whenLabel(it, now) }
+    }
 
     fun day(app: Targets.App): AppDay = todayRecords().getValue(app.id)
 
@@ -106,24 +120,40 @@ object Gate {
     fun setCap(app: Targets.App, minutes: Int) {
         store.setCap(app.id, minutes)
         caps = store.caps()
-        windows = store.windows()
         EventLog.write("gate_cap", app.packages.first()) { put("min", minutes) }
         changed()
     }
 
     /** Applies right away, today included. */
-    fun setWindow(app: Targets.App, window: Pair<Int, Int>?) {
-        accrue()
-        store.setWindow(app.id, window?.takeIf { Rules.validWindow(it.first, it.second) })
-        windows = store.windows()
-        val today = todayRecords()
-        today[app.id] = Rules.applyWindow(today.getValue(app.id), window)
+    fun setDayHours(app: Targets.App, chosen: Set<DayOfWeek>, rule: DayHours) {
+        val week = (weekHours(app) + chosen.associateWith { Rules.fitDay(rule) }).filterValues { it != DayHours.AnyTime }
+        saveWeek(app, week)
         EventLog.write("gate_hours", app.packages.first()) {
-            put("start", window?.first ?: -1)
-            put("end", window?.second ?: -1)
+            put("days", chosen.sorted().joinToString(",") { it.name.take(3) })
+            put("start", (rule as? DayHours.Open)?.start ?: -1)
+            put("end", (rule as? DayHours.Open)?.end ?: -1)
+            put("closed", rule == DayHours.Closed)
         }
+    }
+
+    /** Back to any time, every day. */
+    fun clearHours(app: Targets.App) {
+        saveWeek(app, emptyMap())
+        EventLog.write("gate_hours", app.packages.first()) { put("cleared", true) }
+    }
+
+    private fun saveWeek(app: Targets.App, week: WeekHours) {
+        accrue()
+        store.setHours(app.id, week)
+        hours = store.hours()
+        val today = todayRecords()
+        today[app.id] = Rules.applyWindow(today.getValue(app.id), windowFor(app, today()))
         save(force = true)
     }
+
+    /** The hours recorded on a Sloota day, which is named for the weekday it started on. */
+    private fun windowFor(app: Targets.App, dayKey: String): Pair<Int, Int>? =
+        (weekHours(app)[LocalDate.parse(dayKey).dayOfWeek] as? DayHours.Open)?.let { it.start to it.end }
 
     fun addTime(app: Targets.App, minutes: Int) {
         accrue()
@@ -146,7 +176,7 @@ object Gate {
         if (previous != null && previous != app) endIfWinding(previous, "left_app", show = false)
 
         openedInWindow = false
-        if (app != null && !blockIfClosed(app)) openedInWindow = Rules.inWindow(day(app), minuteNow())
+        if (app != null && !blockIfClosed(app)) openedInWindow = inHours(app)
     }
 
     /** Shows the stop screen if [app] is done for today or outside its hours. True if it did. */
@@ -154,7 +184,7 @@ object Gate {
         val d = day(app)
         val kind = when {
             d.phase == Phase.DONE -> EndKind.BLOCKED
-            d.phase == Phase.OPEN && !Rules.inWindow(d, minuteNow()) -> EndKind.CLOSED_HOURS
+            d.phase == Phase.OPEN && !inHours(app) -> EndKind.CLOSED_HOURS
             else -> return false
         }
         EventLog.write("gate_block", app.packages.first()) { put("why", if (kind == EndKind.BLOCKED) "done" else "hours") }
@@ -201,7 +231,7 @@ object Gate {
         val app = current ?: return save(force = false)
         var now = day(app)
         var why = "budget"
-        if (openedInWindow && now.phase == Phase.OPEN && !Rules.inWindow(now, minuteNow())) {
+        if (openedInWindow && now.phase == Phase.OPEN && !inHours(app)) {
             // The open hours ended mid-session.
             now = Rules.closeWindow(now)
             todayRecords()[app.id] = now
@@ -267,7 +297,7 @@ object Gate {
         val today = days.getOrPut(key) { mutableMapOf() }
         Targets.gated.forEach { app ->
             if (app.id !in today) {
-                val w = windows[app.id]
+                val w = windowFor(app, key)
                 today[app.id] = AppDay(
                     limitMs = (limits[app.id] ?: 0) * 60_000L,
                     windowStart = w?.first ?: -1,
@@ -278,8 +308,6 @@ object Gate {
         }
         return today
     }
-
-    private fun minuteNow(): Int = LocalTime.now().let { it.hour * 60 + it.minute }
 
     private fun save(force: Boolean) {
         val now = SystemClock.elapsedRealtime()

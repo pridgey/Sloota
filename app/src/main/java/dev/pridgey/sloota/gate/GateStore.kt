@@ -3,6 +3,7 @@ package dev.pridgey.sloota.gate
 import android.content.Context
 import android.content.SharedPreferences
 import org.json.JSONObject
+import java.time.DayOfWeek
 
 /**
  * Limits and per-day records, kept in SharedPreferences so they survive the accessibility service
@@ -35,20 +36,53 @@ class GateStore(context: Context) {
         prefs.edit().putString(KEY_CAPS, o.toString()).apply()
     }
 
-    /** App id → configured open hours (start, end) in minutes after midnight. Missing = any time. */
-    fun windows(): Map<String, Pair<Int, Int>> {
+    /** App id → weekly open hours. Hours saved before weekdays existed apply to every day. */
+    fun hours(): Map<String, WeekHours> {
+        val saved = prefs.getString(KEY_HOURS, null) ?: return legacyHours()
+        val o = JSONObject(saved)
+        return o.keys().asSequence().associateWith { id ->
+            val week = o.getJSONObject(id)
+            week.keys().asSequence().mapNotNull { name ->
+                val day = runCatching { DayOfWeek.valueOf(name) }.getOrNull() ?: return@mapNotNull null
+                val rule = week.getJSONObject(name)
+                val hours = if (rule.optBoolean("closed")) {
+                    DayHours.Closed
+                } else {
+                    val (s, e) = rule.optInt("s", -1) to rule.optInt("e", -1)
+                    if (!Rules.validWindow(s, e)) return@mapNotNull null
+                    DayHours.Open(s, e)
+                }
+                day to Rules.fitDay(hours)
+            }.toMap()
+        }
+    }
+
+    private fun legacyHours(): Map<String, WeekHours> {
         val o = JSONObject(prefs.getString(KEY_WINDOWS, "{}") ?: "{}")
         return o.keys().asSequence().mapNotNull { id ->
             val w = o.optJSONObject(id) ?: return@mapNotNull null
-            id to (w.optInt("s", -1) to w.optInt("e", -1))
+            val (s, e) = w.optInt("s", -1) to w.optInt("e", -1)
+            if (!Rules.validWindow(s, e)) return@mapNotNull null
+            id to DayOfWeek.entries.associateWith { Rules.fitDay(DayHours.Open(s, e)) }
         }.toMap()
     }
 
-    /** Pass null to remove the hours. */
-    fun setWindow(appId: String, window: Pair<Int, Int>?) {
-        val o = JSONObject(prefs.getString(KEY_WINDOWS, "{}") ?: "{}")
-        if (window == null) o.remove(appId) else o.put(appId, JSONObject().put("s", window.first).put("e", window.second))
-        prefs.edit().putString(KEY_WINDOWS, o.toString()).apply()
+    /** Replaces an app's week. Any-time days aren't stored; an empty week removes the hours. */
+    fun setHours(appId: String, week: WeekHours) {
+        val all = hours() + (appId to week)
+        val root = JSONObject()
+        all.forEach { (id, days) ->
+            val o = JSONObject()
+            days.forEach { (day, rule) ->
+                when (rule) {
+                    DayHours.AnyTime -> Unit
+                    DayHours.Closed -> o.put(day.name, JSONObject().put("closed", true))
+                    is DayHours.Open -> o.put(day.name, JSONObject().put("s", rule.start).put("e", rule.end))
+                }
+            }
+            if (o.length() > 0) root.put(id, o)
+        }
+        prefs.edit().putString(KEY_HOURS, root.toString()).apply()
     }
 
     /** Day key → app id → record. */
@@ -100,5 +134,6 @@ class GateStore(context: Context) {
         const val KEY_DAYS = "days"
         const val KEY_CAPS = "caps"
         const val KEY_WINDOWS = "windows"
+        const val KEY_HOURS = "hours"
     }
 }

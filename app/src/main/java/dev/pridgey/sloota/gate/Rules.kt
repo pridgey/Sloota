@@ -1,10 +1,14 @@
 package dev.pridgey.sloota.gate
 
+import java.time.DayOfWeek
 import java.time.Instant
+import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
+import java.time.format.TextStyle
+import java.util.Locale
 
 /**
  * The pure rules behind gating, kept free of Android so they can be unit tested.
@@ -16,6 +20,19 @@ import java.time.format.FormatStyle
  * it winds down the same way, but ends back in OPEN, since the hours (not the budget) are what closed it.
  */
 enum class Phase { OPEN, WINDING_DOWN, DONE }
+
+/** What one weekday allows. Overnight hours belong to the day they start on. */
+sealed interface DayHours {
+    data object AnyTime : DayHours
+    data object Closed : DayHours
+    /** Minutes after midnight. An [end] before [start] finishes the next day. */
+    data class Open(val start: Int, val end: Int) : DayHours {
+        val overnight: Boolean get() = end < start
+    }
+}
+
+/** Weekday → its rule. A missing day is [DayHours.AnyTime]. */
+typealias WeekHours = Map<DayOfWeek, DayHours>
 
 /** One app on one day. Times are milliseconds of the app being in front with the screen on. */
 data class AppDay(
@@ -47,6 +64,7 @@ object Rules {
 
     /** Days roll over at 4 AM, so a late-night session counts toward the evening it started in. */
     const val DAY_START_HOUR = 4L
+    const val DAY_START_MIN = 4 * 60
 
     fun dayKey(epochMs: Long, zone: ZoneId = ZoneId.systemDefault()): String =
         Instant.ofEpochMilli(epochMs).atZone(zone).minusHours(DAY_START_HOUR).toLocalDate().toString()
@@ -83,11 +101,79 @@ object Rules {
 
     fun validWindow(start: Int, end: Int): Boolean = start in 0 until DAY_MIN && end in 0 until DAY_MIN && start != end
 
-    /** Whether [minute] (after midnight) is inside today's open hours. Always true without hours. */
-    fun inWindow(day: AppDay, minute: Int): Boolean {
-        if (!day.windowed) return true
-        val (s, e) = day.windowStart to day.windowEnd
-        return if (s < e) minute in s until e else minute >= s || minute < e
+    /** Hours must sit inside one Sloota day: start at 4 AM or later, end by 4 AM the next morning. */
+    fun fitsDay(start: Int, end: Int): Boolean =
+        validWindow(start, end) && start >= DAY_START_MIN && (end > start || end <= DAY_START_MIN)
+
+    /** Trims hours saved before the 4 AM boundary. Hours entirely before 4 AM leave nothing, so the day is closed. */
+    fun fitDay(rule: DayHours): DayHours {
+        if (rule !is DayHours.Open || fitsDay(rule.start, rule.end)) return rule
+        if (rule.start < DAY_START_MIN && rule.end > rule.start && rule.end <= DAY_START_MIN) return DayHours.Closed
+        val start = maxOf(rule.start, DAY_START_MIN)
+        return DayHours.Open(start, if (rule.end in (DAY_START_MIN + 1) until start) DAY_START_MIN else rule.end)
+    }
+
+    /** Whether the schedule allows [at], including overnight hours carried over from the day before. */
+    fun isOpen(week: WeekHours, at: LocalDateTime): Boolean {
+        val minute = at.hour * 60 + at.minute
+        val today = week[at.dayOfWeek] ?: DayHours.AnyTime
+        if (today is DayHours.AnyTime) return true
+        if (today is DayHours.Open && minute >= today.start && (today.overnight || minute < today.end)) return true
+        val yesterday = week[at.dayOfWeek.minus(1)]
+        return yesterday is DayHours.Open && yesterday.overnight && minute < yesterday.end
+    }
+
+    /** The next time a closed app opens, or null if it's open now or the schedule never opens. */
+    fun nextOpen(week: WeekHours, at: LocalDateTime): LocalDateTime? {
+        if (isOpen(week, at)) return null
+        return (0..7).mapNotNull { offset ->
+            val date = at.toLocalDate().plusDays(offset.toLong())
+            when (val rule = week[date.dayOfWeek] ?: DayHours.AnyTime) {
+                DayHours.AnyTime -> date.atStartOfDay()
+                DayHours.Closed -> null
+                is DayHours.Open -> date.atTime(rule.start / 60, rule.start % 60)
+            }
+        }.filter { it.isAfter(at) }.minOrNull()
+    }
+
+    /** When the current open stretch ends, across adjoining days; null if closed now or it never ends. */
+    fun closesAt(week: WeekHours, at: LocalDateTime): LocalDateTime? {
+        if (!isOpen(week, at)) return null
+        return (-1..8).mapNotNull { offset ->
+            val date = at.toLocalDate().plusDays(offset.toLong())
+            when (val rule = week[date.dayOfWeek] ?: DayHours.AnyTime) {
+                DayHours.AnyTime -> date.plusDays(1).atStartOfDay()
+                DayHours.Closed -> null
+                is DayHours.Open -> date.plusDays(if (rule.overnight) 1 else 0).atTime(rule.end / 60, rule.end % 60)
+            }
+        }.filter { it.isAfter(at) && !isOpen(week, it) }.minOrNull()
+    }
+
+    /** Days sharing a rule, in Monday-first order, for the summary list. */
+    fun groups(week: WeekHours): List<Pair<List<DayOfWeek>, DayHours>> =
+        DayOfWeek.entries.groupBy { week[it] ?: DayHours.AnyTime }.map { (rule, days) -> days to rule }
+
+    /** "Every day", "Mon–Fri", "Sat, Sun" or "Mon–Wed, Fri". */
+    fun daysLabel(days: Collection<DayOfWeek>, locale: Locale = Locale.getDefault()): String {
+        if (days.size == 7) return "Every day"
+        val name = { d: DayOfWeek -> d.getDisplayName(TextStyle.SHORT, locale) }
+        val runs = mutableListOf<MutableList<DayOfWeek>>()
+        days.sorted().forEach { d ->
+            if (runs.lastOrNull()?.last()?.value == d.value - 1) runs.last().add(d) else runs.add(mutableListOf(d))
+        }
+        return runs.joinToString(", ") { run ->
+            if (run.size >= 3) "${name(run.first())}–${name(run.last())}" else run.joinToString(", ", transform = name)
+        }
+    }
+
+    /** "6:00 PM" today, "tomorrow at 6:00 PM", or "Sat at 6:00 PM". */
+    fun whenLabel(target: LocalDateTime, now: LocalDateTime, locale: Locale = Locale.getDefault()): String {
+        val time = clock(target.hour * 60 + target.minute)
+        return when (target.toLocalDate()) {
+            now.toLocalDate() -> time
+            now.toLocalDate().plusDays(1) -> "tomorrow at $time"
+            else -> "${target.dayOfWeek.getDisplayName(TextStyle.SHORT, locale)} at $time"
+        }
     }
 
     /** The open hours just ended while in the app: wind down to the next stopping point. */

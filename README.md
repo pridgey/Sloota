@@ -16,7 +16,9 @@ Days start at 4 AM.
 | Lurk | reported by Lurk itself (see below) |
 | any | leaving the app, turning the screen off |
 
-**Open hours** (per app): only allow the app during a time range, which can run past midnight. Outside it the app
+**Open hours** (per app): set hours for each day of the week, or mark a day as any time or closed. Hours can run past
+midnight and belong to the day they start on, so Friday 10 PM to 1 AM stays open into Saturday. They follow Sloota's
+day, so they can start at 4 AM at the earliest and end by 4 AM the next morning. Outside them the app
 stays closed, and More time can't open it. When the hours end mid-session, the app winds down to the next stopping
 point like a limit does. With a daily limit too, the limit only counts inside the hours and whichever runs out first
 ends the session. Changes to hours apply right away.

@@ -4,8 +4,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.DayOfWeek
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.util.Locale
 
 class RulesTest {
     private val min = 60_000L
@@ -96,17 +98,76 @@ class RulesTest {
 
     @Test
     fun `open hours, same day and overnight`() {
-        val evening = AppDay(windowStart = h(18), windowEnd = h(21))
-        assertTrue(Rules.inWindow(evening, h(18)))
-        assertTrue(Rules.inWindow(evening, h(20, 59)))
-        assertFalse(Rules.inWindow(evening, h(21)))
-        assertFalse(Rules.inWindow(evening, h(9)))
-        val late = AppDay(windowStart = h(22), windowEnd = h(1))
-        assertTrue(Rules.inWindow(late, h(23, 30)))
-        assertTrue(Rules.inWindow(late, h(0, 30)))
-        assertFalse(Rules.inWindow(late, h(1)))
-        assertTrue(Rules.inWindow(AppDay(), h(3)))
+        val evening = DayOfWeek.entries.associateWith { DayHours.Open(h(18), h(21)) }
+        assertTrue(Rules.isOpen(evening, fri(18)))
+        assertTrue(Rules.isOpen(evening, fri(20, 59)))
+        assertFalse(Rules.isOpen(evening, fri(21)))
+        assertFalse(Rules.isOpen(evening, fri(9)))
+        val late = DayOfWeek.entries.associateWith { DayHours.Open(h(22), h(1)) }
+        assertTrue(Rules.isOpen(late, fri(23, 30)))
+        assertTrue(Rules.isOpen(late, fri(0, 30)))
+        assertFalse(Rules.isOpen(late, fri(1)))
+        assertTrue(Rules.isOpen(emptyMap(), fri(3)))
     }
+
+    // 2026-11-20 is a Friday.
+    private fun fri(hour: Int, minute: Int = 0) = LocalDateTime.of(2026, 11, 20, hour, minute)
+
+    @Test
+    fun `overnight hours spill into a day with its own rule`() {
+        val week = mapOf(
+            DayOfWeek.FRIDAY to DayHours.Open(h(22), h(1)),
+            DayOfWeek.SATURDAY to DayHours.Closed,
+        )
+        assertTrue(Rules.isOpen(week, fri(23)))
+        assertTrue(Rules.isOpen(week, fri(23).plusHours(1).plusMinutes(30)))
+        assertFalse(Rules.isOpen(week, fri(23).plusHours(2)))
+        assertFalse(Rules.isOpen(week, fri(12).plusDays(1)))
+    }
+
+    @Test
+    fun `next open skips closed days and close follows adjoining hours`() {
+        val week = DayOfWeek.entries.associateWith<DayOfWeek, DayHours> { DayHours.Closed } +
+            mapOf(
+                DayOfWeek.FRIDAY to DayHours.Open(h(18), h(4)),
+                DayOfWeek.SATURDAY to DayHours.Open(h(4), h(6)),
+                DayOfWeek.MONDAY to DayHours.Open(h(9), h(10)),
+            )
+        assertEquals(fri(18), Rules.nextOpen(week, fri(9)))
+        assertEquals(fri(6).plusDays(1), Rules.closesAt(week, fri(20)))
+        assertEquals(fri(9).plusDays(3), Rules.nextOpen(week, fri(7).plusDays(1)))
+        assertEquals(null, Rules.nextOpen(DayOfWeek.entries.associateWith { DayHours.Closed }, fri(9)))
+    }
+
+    @Test
+    fun `hours stay between 4 AM and 4 AM the next day`() {
+        assertTrue(Rules.fitsDay(h(4), h(9)))
+        assertTrue(Rules.fitsDay(h(22), h(4)))
+        assertTrue(Rules.fitsDay(h(4), h(3, 59)))
+        assertFalse(Rules.fitsDay(h(3, 59), h(9)))
+        assertFalse(Rules.fitsDay(h(22), h(4, 1)))
+    }
+
+    @Test
+    fun `saved hours are trimmed to the 4 AM boundary`() {
+        assertEquals(DayHours.Open(h(22), h(4)), Rules.fitDay(DayHours.Open(h(22), h(5))))
+        assertEquals(DayHours.Open(h(4), h(5)), Rules.fitDay(DayHours.Open(h(2), h(5))))
+        assertEquals(DayHours.Open(h(4), h(1)), Rules.fitDay(DayHours.Open(h(2), h(1))))
+        assertEquals(DayHours.Closed, Rules.fitDay(DayHours.Open(h(1), h(3))))
+        assertEquals(DayHours.Open(h(18), h(21)), Rules.fitDay(DayHours.Open(h(18), h(21))))
+    }
+
+    @Test
+    fun `day groups read naturally`() {
+        val week = (DayOfWeek.MONDAY..DayOfWeek.FRIDAY).associateWith { DayHours.Open(h(18), h(21)) }
+        val groups = Rules.groups(week)
+        assertEquals("Mon–Fri", Rules.daysLabel(groups[0].first, Locale.US))
+        assertEquals("Sat, Sun", Rules.daysLabel(groups[1].first, Locale.US))
+        assertEquals(DayHours.AnyTime, groups[1].second)
+        assertEquals("Every day", Rules.daysLabel(DayOfWeek.entries, Locale.US))
+    }
+
+    private operator fun DayOfWeek.rangeTo(end: DayOfWeek) = DayOfWeek.entries.filter { it.value in value..end.value }
 
     @Test
     fun `hours ending winds down, then closes until they reopen`() {
